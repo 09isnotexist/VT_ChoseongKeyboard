@@ -147,14 +147,9 @@ class ChoseongKeyboardService : InputMethodService() {
             "delete" -> {
                 if (composer.isComposing()) {
                     composer.delete()
-                    replaceComposingText(composer.getComposedText())
+                    replaceComposingText(composer.getComposed())
                 } else {
                     currentInputConnection.deleteSurroundingText(1, 0)
-                    if (choseongBuffer.isNotEmpty()) {
-                        choseongBuffer.deleteCharAt(choseongBuffer.length - 1)
-                        updatePreview()
-                        clearSuggestions()
-                    }
                 }
             }
             "한" -> {
@@ -181,39 +176,10 @@ class ChoseongKeyboardService : InputMethodService() {
             }
             else -> {
                 val finalKey = if (isShifted && currentMode == KeyboardMode.HANGUL) convertToDoubleConsonant(key) else key
-
-                if (currentMode == KeyboardMode.HANGUL && finalKey.matches(Regex("[ㄱ-ㅎㅏ-ㅣ]"))) {
-                    if (finalKey.matches(Regex("[ㅏ-ㅣ]"))) {
-                        // 모음 입력 시 초성 제안 종료
-                        choseongBuffer.clear()
-                        preview.text = ""
-                        clearSuggestions()
-                    }
-                    composer.addJamo(finalKey)
-                    if (finalKey.matches(Regex("[ㄱ-ㅎ]"))) {
-                        val ic = currentInputConnection
-                        val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
-                        if (before == null || before == ' ') {
-                            choseongBuffer.append(finalKey)
-                            if (choseongBuffer.length >= 2) {
-                                updatePreview()
-                                val suggestions = dictionary[choseongBuffer.toString()]
-                                if (suggestions != null) showSuggestions(suggestions) else clearSuggestions()
-                            } else {
-                                clearSuggestions()
-                            }
-                        } else {
-                            choseongBuffer.clear()
-                            clearSuggestions()
-                        }
-                        updatePreview()
-                        val suggestions = dictionary[choseongBuffer.toString()]
-                        if (suggestions != null) showSuggestions(suggestions) else clearSuggestions()
-                    } else {
-                        choseongBuffer.clear()
-                        clearSuggestions()
-                    }
-                    replaceComposingText(composer.getComposedText())
+                if (currentMode == KeyboardMode.HANGUL && finalKey.length == 1) {
+                    val result = composer.addJamo(finalKey[0])
+                    if (result != null) commitText(result)
+                    replaceComposingText(composer.getComposed())
                 } else {
                     commitText(composer.commit())
                     replaceComposingText("")
@@ -236,14 +202,7 @@ class ChoseongKeyboardService : InputMethodService() {
 
     private fun getDisplayKey(key: String): String {
         return if (currentMode == KeyboardMode.HANGUL && isShifted) {
-            when (key) {
-                "ㄱ" -> "ㄲ"
-                "ㄷ" -> "ㄸ"
-                "ㅂ" -> "ㅃ"
-                "ㅅ" -> "ㅆ"
-                "ㅈ" -> "ㅉ"
-                else -> key
-            }
+            convertToDoubleConsonant(key)
         } else key
     }
 
@@ -251,7 +210,7 @@ class ChoseongKeyboardService : InputMethodService() {
         currentInputConnection.commitText(text, 1)
     }
 
-    private fun replaceComposingText(text: String) {
+    private fun replaceComposingText(text: String?) {
         currentInputConnection.setComposingText(text, 1)
     }
 
@@ -265,50 +224,7 @@ class ChoseongKeyboardService : InputMethodService() {
         )
     }
 
-    private fun updatePreview() {
-        preview.text = "입력: $choseongBuffer"
-    }
-
-    private fun clearSuggestions() {
-        suggestionRow.removeAllViews()
-    }
-
-    private fun showSuggestions(words: List<String>) {
-        clearSuggestions()
-        words.forEach { word ->
-            val btn = Button(this).apply {
-                text = word
-                setOnClickListener {
-                    commitText(word)
-                    choseongBuffer.clear()
-                    updatePreview()
-                    clearSuggestions()
-                }
-            }
-            suggestionRow.addView(btn)
-        }
-    }
-
-    private fun loadDictionary(): Map<String, List<String>> {
-        return try {
-            val inputStream = assets.open("choseong_dict.json")
-            val json = inputStream.bufferedReader().use { it.readText() }
-            val result = mutableMapOf<String, List<String>>()
-            val jsonObj = org.json.JSONObject(json)
-            for (key in jsonObj.keys()) {
-                val array = jsonObj.getJSONArray(key)
-                val list = mutableListOf<String>()
-                for (i in 0 until array.length()) {
-                    list.add(array.getString(i))
-                }
-                result[key] = list
-            }
-            result
-        } catch (e: Exception) {
-            e.printStackTrace()
-            emptyMap()
-        }
-    }
+    private fun loadDictionary(): Map<String, List<String>> = emptyMap()
 }
 
 class HangulComposer {
@@ -322,34 +238,56 @@ class HangulComposer {
         ' ', 'ㄱ','ㄲ','ㄳ','ㄴ','ㄵ','ㄶ','ㄷ','ㄹ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅁ','ㅂ','ㅄ','ㅅ','ㅆ','ㅇ','ㅈ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'
     )
 
-    private var buffer = mutableListOf<Char>()
+    private var cho: Char? = null
+    private var jung: Char? = null
+    private var jong: Char? = null
 
-    fun addJamo(jamo: String) {
-        if (jamo.length == 1) buffer.add(jamo[0])
+    fun addJamo(jamo: Char): String? {
+        if (cho == null && isChoseong(jamo)) {
+            cho = jamo
+        } else if (cho != null && jung == null && isJungseong(jamo)) {
+            jung = jamo
+        } else if (cho != null && jung != null && jong == null && isJongseong(jamo)) {
+            jong = jamo
+        } else {
+            val result = commit()
+            cho = if (isChoseong(jamo)) jamo else null
+            jung = if (isJungseong(jamo)) jamo else null
+            jong = if (isJongseong(jamo)) jamo else null
+            return result
+        }
+        return null
     }
 
-    fun getComposedText(): String {
-        return compose(buffer)?.toString() ?: buffer.joinToString("")
-    }
-
-    fun isComposing(): Boolean = buffer.isNotEmpty()
-
-    fun delete() {
-        if (buffer.isNotEmpty()) buffer.removeAt(buffer.size - 1)
+    fun getComposed(): String? {
+        if (cho != null && jung != null) {
+            val c = choseong.indexOf(cho!!)
+            val j = jungseong.indexOf(jung!!)
+            val t = if (jong != null) jongseong.indexOf(jong!!) else 0
+            if (c >= 0 && j >= 0 && t >= 0) {
+                return (0xAC00 + (c * 21 * 28) + (j * 28) + t).toChar().toString()
+            }
+        }
+        return null
     }
 
     fun commit(): String {
-        val text = getComposedText()
-        buffer.clear()
-        return text
+        val result = getComposed() ?: ""
+        cho = null; jung = null; jong = null
+        return result
     }
 
-    private fun compose(buf: List<Char>): Char? {
-        if (buf.size < 2) return null
-        val c = choseong.indexOf(buf[0])
-        val j = jungseong.indexOf(buf[1])
-        val t = if (buf.size > 2) jongseong.indexOf(buf[2]) else 0
-        if (c < 0 || j < 0 || t < 0) return null
-        return (0xAC00 + (c * 21 * 28) + (j * 28) + t).toChar()
+    fun isComposing(): Boolean = cho != null || jung != null || jong != null
+
+    fun delete() {
+        when {
+            jong != null -> jong = null
+            jung != null -> jung = null
+            cho != null -> cho = null
+        }
     }
+
+    private fun isChoseong(ch: Char): Boolean = choseong.contains(ch)
+    private fun isJungseong(ch: Char): Boolean = jungseong.contains(ch)
+    private fun isJongseong(ch: Char): Boolean = jongseong.contains(ch)
 }
